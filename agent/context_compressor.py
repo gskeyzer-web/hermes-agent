@@ -16,6 +16,8 @@ Improvements over v2:
   - Richer tool call/result detail in summarizer input
 """
 
+import concurrent.futures
+import contextvars
 import copy
 import hashlib
 import json
@@ -29,6 +31,7 @@ from typing import Any, Dict, List, Optional
 from agent.auxiliary_client import (
     AuxiliaryExplicitCancellation,
     _is_connection_error,
+    _is_timeout_error,
     aux_interrupt_protection,
     call_llm,
 )
@@ -976,6 +979,7 @@ def _build_recovery_footer(session_id: str, region_len: int) -> str:
 _LEAN_DIGEST_CHUNK_CHARS = 72_000      # ~18K tokens of region per chunk
 _LEAN_DIGEST_MAX_CHUNKS = 28
 _LEAN_DIGEST_MAX_TOKENS = 1_400        # per-chunk digest cap (~13:1 ratio)
+_LEAN_DIGEST_MAX_WORKERS = 4            # bound provider load while hiding RTT
 _LEAN_DIGESTS_HEADING = "## Detailed Session Log (chunked digests, oldest first)"
 
 _LEAN_DIGEST_PROMPT = """You are writing one segment of a detailed session log for an AI agent's context checkpoint. Digest the transcript segment below.
@@ -2165,6 +2169,14 @@ class ContextCompressor(ContextEngine):
             "fit_margin": None,
             "chunking": False,
             "chunk_count": 0,
+            "lean_digest_segment_count": 0,
+            "lean_digest_success_count": 0,
+            "lean_digest_failure_count": 0,
+            "lean_digest_rate_limit_count": 0,
+            "lean_digest_timeout_count": 0,
+            "lean_digest_other_failure_count": 0,
+            "lean_digest_max_workers": 0,
+            "lean_digest_duration_ms": None,
             "total_duration_ms": None,
             "aux_call_duration_ms": None,
             "fallback_used": False,
@@ -4512,8 +4524,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         ``_LEAN_DIGEST_MAX_CHUNKS`` — beyond that, earliest chunks are merged
         coarser) and digests each with the compression LLM. Any chunk failure
         degrades to a placeholder naming the message range; the whole call
-        never raises. Chunks run sequentially on the same transport as the
-        main summary.
+        never raises. Chunks run through a small bounded pool and are assembled
+        in chronological order regardless of completion order.
         """
         text = _serialize_turns_for_digest(
             turns, getattr(self, "_lean_pristine_tools", None),
@@ -4525,11 +4537,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         if n_chunks > _LEAN_DIGEST_MAX_CHUNKS:
             chunk_size = (len(text) + _LEAN_DIGEST_MAX_CHUNKS - 1) // _LEAN_DIGEST_MAX_CHUNKS
             n_chunks = _LEAN_DIGEST_MAX_CHUNKS
-        digests: list[str] = []
-        for ci in range(n_chunks):
+        def _digest_one(ci: int) -> tuple[int, str, str | None] | None:
             segment = text[ci * chunk_size:(ci + 1) * chunk_size]
             if not segment.strip():
-                continue
+                return None
+            failure_kind = None
             try:
                 from agent.auxiliary_client import call_llm
 
@@ -4551,7 +4563,69 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             except Exception as exc:
                 logger.warning("lean chunk digest %d/%d failed: %s", ci + 1, n_chunks, exc)
                 body = f"[digest unavailable for segment {ci + 1}/{n_chunks} — recover via session_search]"
-            digests.append(f"### Segment {ci + 1}/{n_chunks}\n{body}")
+                if (
+                    getattr(exc, "status_code", None) == 429
+                    or classify_api_error(exc).reason is FailoverReason.rate_limit
+                ):
+                    failure_kind = "rate_limit"
+                elif isinstance(exc, TimeoutError) or _is_timeout_error(exc):
+                    failure_kind = "timeout"
+                else:
+                    failure_kind = "other"
+            return ci, body, failure_kind
+
+        workers = min(_LEAN_DIGEST_MAX_WORKERS, n_chunks)
+        digest_started = time.monotonic()
+        if workers <= 1:
+            results = [_digest_one(0)]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="lean-digest",
+            ) as pool:
+                # ThreadPoolExecutor does not propagate ContextVars. Capture a
+                # distinct context per worker so profile/runtime/secret scope
+                # and cancellation state follow every auxiliary digest call.
+                futures = [
+                    pool.submit(contextvars.copy_context().run, _digest_one, ci)
+                    for ci in range(n_chunks)
+                ]
+                # Resolve in submission order even when later segments finish
+                # first, so the historical log stays deterministic.
+                results = [future.result() for future in futures]
+
+        completed = [result for result in results if result is not None]
+        digests = [
+            f"### Segment {ci + 1}/{n_chunks}\n{body}"
+            for ci, body, _failure_kind in completed
+        ]
+        failures = [failure_kind for _, _, failure_kind in completed if failure_kind]
+        duration_ms = int((time.monotonic() - digest_started) * 1000)
+        telemetry = getattr(self, "_active_compression_telemetry", None)
+        if isinstance(telemetry, dict):
+            telemetry.update({
+                "lean_digest_segment_count": len(completed),
+                "lean_digest_success_count": len(completed) - len(failures),
+                "lean_digest_failure_count": len(failures),
+                "lean_digest_rate_limit_count": failures.count("rate_limit"),
+                "lean_digest_timeout_count": failures.count("timeout"),
+                "lean_digest_other_failure_count": failures.count("other"),
+                "lean_digest_max_workers": workers,
+                "lean_digest_duration_ms": duration_ms,
+            })
+        if failures:
+            logger.warning(
+                "Lean digests completed with failures: segments=%d success=%d "
+                "failed=%d rate_limits=%d timeouts=%d other=%d duration_ms=%d",
+                len(completed), len(completed) - len(failures), len(failures),
+                failures.count("rate_limit"), failures.count("timeout"),
+                failures.count("other"), duration_ms,
+            )
+        else:
+            logger.info(
+                "Lean digests completed: segments=%d workers=%d duration_ms=%d",
+                len(completed), workers, duration_ms,
+            )
         if not digests:
             return ""
         return (
