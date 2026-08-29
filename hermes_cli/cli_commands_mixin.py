@@ -165,6 +165,16 @@ class CLICommandsMixin:
                 more = f" (+{len(skipped) - 5} more)" if len(skipped) > 5 else ""
                 print(f"  ↷ Kept your hand-edits: {shown}{more}")
                 print("  Use /rollback <N> --all to restore those too.")
+            oversize = result.get("skipped_oversize") or []
+            if oversize:
+                shown = ", ".join(oversize[:5])
+                more = f" (+{len(oversize) - 5} more)" if len(oversize) > 5 else ""
+                print(f"  ↷ Kept (too large for checkpoints, no stored copy to revert to): {shown}{more}")
+            failed = result.get("failed_deletes") or []
+            if failed:
+                shown = ", ".join(failed[:5])
+                more = f" (+{len(failed) - 5} more)" if len(failed) > 5 else ""
+                print(f"  ⚠️ Could not remove (left in place): {shown}{more}")
             print("  A pre-rollback snapshot was saved automatically.")
 
             # Also undo the last conversation turn so the agent's context
@@ -375,9 +385,24 @@ class CLICommandsMixin:
                     return
             except ValueError:
                 pass
+
+            # Close our local SessionDB connection before restore so the
+            # backup-API restore doesn't contend with a live connection to
+            # state.db from this same process (issue #65942).
+            local_session_db = getattr(self, "_session_db", None)
+            if local_session_db is not None:
+                try:
+                    local_session_db.close()
+                    self._session_db = None
+                except Exception:
+                    pass
+
             if restore_quick_snapshot(snap_id):
                 print(f"  Restored state from: {snap_id}")
-                print("  Restart recommended for state.db changes to take effect.")
+                print(
+                    "  Restart recommended for gateway/dashboard processes "
+                    "to pick up state.db changes."
+                )
             else:
                 print(f"  Snapshot not found: {snap_id}")
 
@@ -2178,7 +2203,7 @@ class CLICommandsMixin:
         save_config_value(f"{subsystem}.write_approval", bool(enabled))
 
     def _handle_background_command(self, cmd: str):
-        """Handle /background <prompt> — run a prompt in a separate background session.
+        """Handle /bg <prompt> — run a prompt in a separate background session.
 
         Spawns a new AIAgent in a background thread with its own session.
         When it completes, prints the result to the CLI without modifying
@@ -2187,8 +2212,9 @@ class CLICommandsMixin:
         from cli import AIAgent, ChatConsole, _accent_hex, _cprint, _maybe_remap_for_light_mode, _render_final_assistant_content, set_approval_callback, set_secret_capture_callback, set_sudo_password_callback
         parts = cmd.strip().split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
-            _cprint("  Usage: /background <prompt>")
-            _cprint("  Example: /background Summarize the top HN stories today")
+            _cprint("  Usage: /bg <prompt>")
+            _cprint("  Example: /bg Summarize the top HN stories today")
+            _cprint("  (For a side question about this conversation, use /btw <question>.)")
             _cprint("  The task runs in a separate session and results display here when done.")
             return
 
@@ -2331,6 +2357,101 @@ class CLICommandsMixin:
         thread = threading.Thread(target=run_background, daemon=True, name=f"bg-task-{task_id}")
         self._background_tasks[task_id] = thread
         thread.start()
+
+    def _handle_btw_command(self, cmd: str):
+        """Handle /btw <question> — answer a side question about this conversation.
+
+        Snapshots the live conversation history and asks a one-shot auxiliary
+        LLM call (same model as the session by default) to answer the question
+        against that snapshot. The live session is never touched: no history
+        mutation, no role-alternation risk, no prompt-cache invalidation. The
+        current turn keeps running; the answer prints when ready.
+        """
+        from cli import ChatConsole, _accent_hex, _cprint
+
+        parts = cmd.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            _cprint("  Usage: /btw <question>")
+            _cprint("  Example: /btw which file was that error in?")
+            _cprint("  Answers a quick question about this conversation without interrupting it.")
+            _cprint("  (For an independent background task, use /bg <prompt>.)")
+            return
+
+        question = parts[1].strip()
+
+        if not self._ensure_runtime_credentials():
+            _cprint("  (>_<) Cannot answer side question: no valid credentials.")
+            return
+
+        # Snapshot NOW, on the UI thread — the foreground turn keeps appending
+        # to conversation_history while the worker runs.
+        history_snapshot = list(self.conversation_history or [])
+        # Live agent → cache-parity fork (full context, warm cache reads).
+        parent_agent = self.agent
+        turn_route = self._resolve_turn_agent_config(question)
+        main_runtime = {
+            "model": turn_route["model"],
+            "provider": turn_route["runtime"].get("provider"),
+            "base_url": turn_route["runtime"].get("base_url"),
+            "api_key": turn_route["runtime"].get("api_key"),
+            "api_mode": turn_route["runtime"].get("api_mode"),
+        }
+
+        preview = question[:60] + ("..." if len(question) > 60 else "")
+        _cprint(f"  💬 Side question: \"{preview}\"")
+        _cprint("  Answering from a snapshot of this conversation — the current work continues.\n")
+
+        def run_side_question():
+            try:
+                from agent.side_question import answer_side_question
+                answer = answer_side_question(
+                    question,
+                    history_snapshot,
+                    parent_agent=parent_agent,
+                    main_runtime=main_runtime,
+                )
+                if self._app:
+                    self._app.invalidate()
+                    time.sleep(0.05)
+                print()
+                ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
+                _cprint(f"  💬 /btw: \"{preview}\"")
+                ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
+                if answer:
+                    from cli import _maybe_remap_for_light_mode, _render_final_assistant_content
+                    try:
+                        from hermes_cli.skin_engine import get_active_skin
+                        _skin = get_active_skin()
+                        label = _skin.get_branding("response_label", "⚕ Hermes")
+                        _resp_color = _maybe_remap_for_light_mode(_skin.get_color("response_border", "#CD7F32"))
+                        _resp_text = _maybe_remap_for_light_mode(_skin.get_color("banner_text", "#FFF8DC"))
+                    except Exception:
+                        label = "⚕ Hermes"
+                        _resp_color = "#CD7F32"
+                        _resp_text = "#FFF8DC"
+                    ChatConsole().print(Panel(
+                        _render_final_assistant_content(answer, mode=self.final_response_markdown),
+                        title=f"[{_resp_color} bold]{label} (btw)[/]",
+                        title_align="left",
+                        border_style=_resp_color,
+                        style=_resp_text,
+                        box=rich_box.HORIZONTALS,
+                        padding=(1, 4),
+                        width=self._scrollback_box_width(),
+                    ))
+                else:
+                    _cprint("  (No answer generated)")
+            except Exception as e:
+                if self._app:
+                    self._app.invalidate()
+                    time.sleep(0.05)
+                print()
+                _cprint(f"  ❌ /btw failed: {e}")
+            finally:
+                if self._app:
+                    self._invalidate(min_interval=0)
+
+        threading.Thread(target=run_side_question, daemon=True, name="btw-side-question").start()
 
     def _handle_bundles_command(self, cmd: str) -> None:
         """In-session ``/bundles`` — show installed skill bundles.
