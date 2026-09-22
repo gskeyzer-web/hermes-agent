@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from hermes_cli.gateway import _runtime_health_lines
 
 
@@ -57,11 +58,93 @@ def test_runtime_health_lines_include_fatal_platform_and_startup_reason(monkeypa
             },
         },
     )
+    monkeypatch.setattr(
+        "hermes_cli.gateway.load_gateway_config",
+        lambda: GatewayConfig(
+            platforms={Platform.TELEGRAM: PlatformConfig(enabled=True)}
+        ),
+    )
 
     lines = _runtime_health_lines()
 
     assert "⚠ telegram: another poller is active" in lines
     assert "⚠ Last startup issue: telegram conflict" in lines
+
+
+def test_runtime_health_lines_omits_historical_fatal_for_disabled_platform(monkeypatch):
+    """An explicit current disable wins over a retained fatal status from an older gateway run."""
+    monkeypatch.setattr(
+        "gateway.status.read_runtime_status",
+        lambda: {
+            "platforms": {
+                "api_server": {
+                    "state": "fatal",
+                    "error_message": "address already in use",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.gateway.load_gateway_config",
+        lambda: GatewayConfig(
+            platforms={Platform.API_SERVER: PlatformConfig(enabled=False)}
+        ),
+    )
+
+    lines = _runtime_health_lines()
+
+    assert "⚠ api_server: address already in use" not in lines
+
+
+def test_runtime_health_lines_keeps_fatal_for_enabled_platform(monkeypatch):
+    """A fatal state remains visible while that platform is currently enabled."""
+    monkeypatch.setattr(
+        "gateway.status.read_runtime_status",
+        lambda: {
+            "platforms": {
+                "api_server": {
+                    "state": "fatal",
+                    "error_message": "address already in use",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.gateway.load_gateway_config",
+        lambda: GatewayConfig(
+            platforms={Platform.API_SERVER: PlatformConfig(enabled=True)}
+        ),
+    )
+
+    assert "⚠ api_server: address already in use" in _runtime_health_lines()
+
+
+def test_runtime_health_lines_preserves_gateway_health_when_disabled_fatal_is_hidden(monkeypatch):
+    """Filtering an obsolete platform error does not hide a gateway-level startup diagnosis."""
+    monkeypatch.setattr(
+        "gateway.status.read_runtime_status",
+        lambda: {
+            "gateway_state": "startup_failed",
+            "exit_reason": "gateway configuration rejected",
+            "platforms": {
+                "api_server": {
+                    "state": "fatal",
+                    "error_message": "old bind failure",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.gateway.load_gateway_config",
+        lambda: GatewayConfig(
+            platforms={Platform.API_SERVER: PlatformConfig(enabled=False)}
+        ),
+    )
+
+    lines = _runtime_health_lines()
+
+    assert "⚠ api_server: old bind failure" not in lines
+    assert "⚠ Last startup issue: gateway configuration rejected" in lines
 
 
 def test_runtime_health_lines_flag_stale_heartbeat_with_live_pid(monkeypatch):

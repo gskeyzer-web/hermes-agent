@@ -4168,10 +4168,23 @@ def _runtime_health_lines() -> list[str]:
 
     gateway_state = state.get("gateway_state")
     exit_reason = state.get("exit_reason")
-    lines = [
-        f"⚠ {platform}: {pdata.get('error_message') or 'unknown error'}"
+    fatal_platforms = [
+        (platform, pdata)
         for platform, pdata in (state.get("platforms", {}) or {}).items()
         if pdata.get("state") == "fatal"
+    ]
+    # The runner creates adapters for every enabled platform, not only the connected subset:
+    # an enabled platform's fatal diagnosis must remain visible even if its configuration is broken.
+    enabled_platforms = {
+        platform.value
+        for platform, platform_config in load_gateway_config().platforms.items()
+        if platform_config.enabled
+    } if fatal_platforms else set()
+    lines = [
+        f"⚠ {platform}: {pdata.get('error_message') or 'unknown error'}"
+        for platform, pdata in fatal_platforms
+        # Namespaced entries belong to another multiplexed profile, whose effective config is not loaded here.
+        if not isinstance(platform, str) or ":" in platform or platform in enabled_platforms
     ]
 
     # A live-claiming snapshot can outlive an ungracefully killed gateway (taskkill /F, OOM). Past
