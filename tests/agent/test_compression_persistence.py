@@ -18,6 +18,7 @@ Bug scenario (pre-fix):
 
 import os
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -57,9 +58,9 @@ class TestFlushAfterCompression:
         """
         from hermes_state import SessionDB
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+        with tempfile.TemporaryDirectory() as tmpdir, closing(
+            SessionDB(db_path=Path(tmpdir) / "test.db")
+        ) as db:
 
             agent = self._make_agent(db)
 
@@ -104,9 +105,9 @@ class TestFlushAfterCompression:
         """Stale conversation_history no longer causes data loss."""
         from hermes_state import SessionDB
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+        with tempfile.TemporaryDirectory() as tmpdir, closing(
+            SessionDB(db_path=Path(tmpdir) / "test.db")
+        ) as db:
 
             agent = self._make_agent(db)
 
@@ -140,9 +141,9 @@ class TestFlushAfterCompression:
         from agent.conversation_compression import conversation_history_after_compression
         from hermes_state import SessionDB
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+        with tempfile.TemporaryDirectory() as tmpdir, closing(
+            SessionDB(db_path=Path(tmpdir) / "test.db")
+        ) as db:
 
             agent = self._make_agent(db)
             agent._ensure_db_session()
@@ -402,7 +403,7 @@ class TestStoredPromptCwdDrift:
         return (
             "Host: Linux (6.16.0)\n"
             "User home directory: /home/tester\n"
-            f"Current working directory: {cwd}\n"
+            f"Current working directory: {Path(cwd)}\n"
         )
 
     def test_stored_prompt_stale_when_cwd_differs(self):
@@ -417,7 +418,7 @@ class TestStoredPromptCwdDrift:
             "Provider: openrouter\n"
         )
 
-        with patch("os.getcwd", return_value="/project/new"):
+        with patch("agent.conversation_loop.resolve_agent_cwd", return_value=Path("/project/new")):
             assert _stored_prompt_matches_runtime(agent, stored_prompt) is False, (
                 "Expected False when stored cwd differs from current cwd"
             )
@@ -435,7 +436,7 @@ class TestStoredPromptCwdDrift:
             "Provider: openrouter\n"
         )
 
-        with patch("os.getcwd", return_value=current_cwd):
+        with patch("agent.conversation_loop.resolve_agent_cwd", return_value=Path(current_cwd)):
             assert _stored_prompt_matches_runtime(agent, stored_prompt) is True, (
                 "Expected True when stored cwd matches current cwd"
             )
@@ -467,7 +468,7 @@ class TestStoredPromptCwdDrift:
             "Provider: openrouter\n"
         )
 
-        with patch("os.getcwd", return_value=current_cwd):
+        with patch("agent.conversation_loop.resolve_agent_cwd", return_value=Path(current_cwd)):
             assert _stored_prompt_matches_runtime(agent, stored_prompt) is True, (
                 "A project file that merely MENTIONS 'Current working "
                 "directory:' must not invalidate the prompt — that would "
@@ -493,7 +494,7 @@ class TestStoredPromptCwdDrift:
             "Provider: openrouter\n"
         )
 
-        with patch("os.getcwd", return_value="/project/new"):
+        with patch("agent.conversation_loop.resolve_agent_cwd", return_value=Path("/project/new")):
             assert _stored_prompt_matches_runtime(agent, stored_prompt) is False, (
                 "Embedded project text naming the new cwd must not mask real "
                 "drift in the host-info block"
@@ -512,8 +513,9 @@ class TestStoredPromptCwdDrift:
         from run_agent import AIAgent
         from agent.system_prompt import build_system_prompt_parts
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+        with tempfile.TemporaryDirectory() as tmpdir, closing(
+            SessionDB(db_path=Path(tmpdir) / "test.db")
+        ) as db:
             with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
                 agent = AIAgent(
                     api_key="test-key",
