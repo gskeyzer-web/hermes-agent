@@ -371,6 +371,24 @@ hermes config set compression.codex_gpt55_autoraise_notice false
 
 ### Codex large-context `-900k` picker variants (opt-in)
 
+Codex context discovery and the model picker share the same catalogue negotiation:
+when `$CODEX_HOME/models_cache.json` (default `~/.codex/models_cache.json`) records a
+valid `client_version`, Hermes queries with that version first. Empty or failed
+responses fall back once to the historical `0.0.0` sentinel; authentication failures
+do not retry. Without local version metadata Hermes uses the sentinel directly.
+Only the client version is read from this file for context discovery; context limits
+come from the authenticated catalogue for the current Hermes account. The sentinel
+can omit newer models, including GPT-6 Sol/Luna.
+
+The standard GPT-6 Sol/Luna Codex window falls back to **272,000** tokens if live
+discovery is unavailable. Unknown Codex models use the conservative 256,000-token
+fallback, never the direct OpenAI API's window. Explicit context overrides still
+take precedence. Sol/Luna do not inherit the gpt-5.x/Astra 85% autoraise or native
+compaction gate. With the default 50% threshold, the existing small-window 75% floor
+therefore gives **204,000** tokens (before any output reservation or auxiliary
+feasibility clamp); the default 256,000-token absolute cap does not lower it.
+This correction does not change prompt-cache keys, request history or cache policy.
+
 The ChatGPT Codex backend *advertises* a 272K window for the gpt-5.4 and
 gpt-5.6 (Sol/Terra/Luna) families, but actually accepts ~911K input tokens
 for ChatGPT-subscription accounts (live-verified Aug 2026). Hermes keeps the

@@ -286,10 +286,9 @@ class TestNormalizeModelForProvider:
         assert cli.model == "gpt-5.5"
 
 
-def test_catalog_requests_use_ungated_client_version(monkeypatch):
-    """Both catalog request sites send the backend's ungated ``0.0.0`` sentinel: the endpoint
-    hides models whose ``minimal_client_version`` is newer than ``client_version``, so a
-    made-up version silently drops future models."""
+def test_catalog_requests_use_ungated_client_version(monkeypatch, tmp_path):
+    """Without local Codex version metadata both request sites retain the sentinel."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     import sys
     from urllib.parse import parse_qs, urlparse
 

@@ -1722,6 +1722,7 @@ def _query_anthropic_context_length(model: str, base_url: str, api_key: Any) -> 
 # slugs). Fallback when the live probe fails; longest-key-first. gpt-5.3-codex-spark is listed so "gpt-5.3-codex" doesn't win.
 _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
     "gpt-6-astra": 272_000,
+    "gpt-6-sol": 272_000, "gpt-6-luna": 272_000,
     "gpt-5.1-codex-max": 272_000, "gpt-5.1-codex-mini": 272_000, "gpt-5.3-codex": 272_000,
     "gpt-5.3-codex-spark": 128_000, "gpt-5.2-codex": 272_000, "gpt-5.4-mini": 272_000,
     "gpt-5.6-sol": 272_000, "gpt-5.6-terra": 272_000, "gpt-5.6-luna": 272_000, "gpt-daybreak-blue-latest": 272_000,
@@ -1806,13 +1807,8 @@ _codex_oauth_context_cache: Dict[str, Tuple[Dict[str, int], float]] = {}
 # opted-in ``-900k`` bump reads it (#105443); a catalog without the field leaves the entry empty.
 _codex_oauth_max_context_cache: Dict[str, Dict[str, int]] = {}
 _CODEX_OAUTH_CONTEXT_CACHE_TTL = 3600  # 1 hour
-# The Codex models endpoint reads ``client_version`` as a Codex CLI compatibility version and
-# hides models whose ``minimal_client_version`` is newer, so a made-up version (the old
-# "1.0.0") silently drops future models. "0.0.0" is the backend's ungated sentinel returning
-# the full account catalog; other out-of-sequence values return an empty catalog and omitting
-# the parameter is HTTP 400.
-CODEX_UNGATED_CLIENT_VERSION = "0.0.0"
-CODEX_MODELS_CATALOG_URL = f"https://chatgpt.com/backend-api/codex/models?client_version={CODEX_UNGATED_CLIENT_VERSION}"
+# Keep the historical exports for callers; both discovery paths share version negotiation.
+from agent.codex_catalog import CODEX_MODELS_CATALOG_URL, CODEX_UNGATED_CLIENT_VERSION, fetch_codex_catalog
 
 
 def _codex_oauth_token_fingerprint(access_token: str) -> str:
@@ -1836,17 +1832,13 @@ def _fetch_codex_oauth_context_lengths_with_source(access_token: str) -> Tuple[D
     headers = {"Authorization": f"Bearer {access_token}", **codex_account_headers(access_token)}
     try:
         _ensure_requests()
-        resp = requests.get(CODEX_MODELS_CATALOG_URL, headers=headers, timeout=(5, 10), verify=_resolve_requests_verify())
-        if resp.status_code != 200:
-            logger.debug("Codex /models probe returned HTTP %s; falling back to hardcoded defaults", resp.status_code)
-            return {}, False
-        data = resp.json()
+        entries = fetch_codex_catalog(lambda url: requests.get(url, headers=headers, timeout=(5, 10), verify=_resolve_requests_verify()))
     except Exception as exc:
         logger.debug("Codex /models probe failed: %s", exc)
         return {}, False
     result: Dict[str, int] = {}
     max_result: Dict[str, int] = {}
-    for item in data.get("models", []) if isinstance(data, dict) else []:
+    for item in entries:
         slug, ctx, max_ctx = (item.get("slug"), item.get("context_window"), item.get("max_context_window")) if isinstance(item, dict) else (None, None, None)
         if isinstance(slug, str) and isinstance(ctx, int) and ctx > 0:
             result[slug.strip()] = ctx
@@ -1855,7 +1847,7 @@ def _fetch_codex_oauth_context_lengths_with_source(access_token: str) -> Tuple[D
     if result:
         _codex_oauth_context_cache[cache_key] = (result, now)
         _codex_oauth_max_context_cache[cache_key] = max_result
-    return result, True
+    return result, bool(result)
 
 
 def _resolve_codex_oauth_context_length_with_source(model: str, access_token: str = "") -> Tuple[Optional[int], str]:
@@ -2130,6 +2122,10 @@ def _resolve_provider_aware_context_length(model: str, base_url: str, api_key: s
             if base_url and source == persist_on:
                 save_context_length(model, base_url, ctx)
             return ctx
+        if effective_provider == "openai-codex":
+            # Direct-API metadata for the same slug is not a Codex entitlement.
+            logger.info("No Codex context metadata for %r; using conservative %d-token fallback", model, DEFAULT_FALLBACK_CONTEXT)
+            return DEFAULT_FALLBACK_CONTEXT
     if effective_provider in {"gmi", "commandcode", "commandcode-anthropic"} and base_url:
         # GMI and CommandCode expose authoritative context_length via /models (e.g. muse-spark 1M) but are
         # not in models.dev, and as known providers they skip step 2's probe — else they fell to 256K.
