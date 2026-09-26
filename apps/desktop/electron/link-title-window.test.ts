@@ -55,6 +55,7 @@ test('createLinkTitleWindow mutes audio so historical links never autoplay sound
 
 test('createLinkTitleWindow denies popups even if optional muting throws', () => {
   let popupHandler
+
   const ThrowingBrowserWindow = function (options) {
     this.options = options
     this.webContents = {
@@ -77,6 +78,7 @@ test('createLinkTitleWindow denies popups even if optional muting throws', () =>
 for (const failure of ['handler throws', 'missing webContents', 'missing handler']) {
   test(`createLinkTitleWindow fails closed for ${failure}`, () => {
     const installationError = new Error('popup handler unavailable')
+
     const scenarios = {
       'handler throws': {
         setAudioMuted() {},
@@ -87,13 +89,17 @@ for (const failure of ['handler throws', 'missing webContents', 'missing handler
       'missing webContents': undefined,
       'missing handler': { setAudioMuted() {} }
     }
+
     let destroyed = false
     let loaded = false
+
     const UnsafeBrowserWindow = function () {
       this.webContents = scenarios[failure]
+
       this.destroy = () => {
         destroyed = true
       }
+
       this.loadURL = () => {
         loaded = true
       }
