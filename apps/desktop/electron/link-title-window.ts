@@ -36,12 +36,18 @@ export function createLinkTitleWindow(BrowserWindow, partitionSession) {
 
   try {
     window.webContents.setAudioMuted(true)
+  } catch {
+    // Muting is best-effort, but must not bypass mandatory popup protection.
+  }
+
+  try {
     // Loads arbitrary user-linked pages on render; it only needs the title, so
     // a popup from that page never has a reason to exist (GHSA-9f4c-93c8-jc8g).
     window.webContents.setWindowOpenHandler(createWindowOpenHandler())
-  } catch {
-    // webContents may be unavailable in degraded/headless environments; muting
-    // is best-effort and the window is destroyed within a few seconds anyway.
+  } catch (error) {
+    // Never expose a window that could load a page without popup protection.
+    window.destroy()
+    throw error
   }
 
   return window
