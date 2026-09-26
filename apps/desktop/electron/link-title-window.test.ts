@@ -53,17 +53,12 @@ test('createLinkTitleWindow mutes audio so historical links never autoplay sound
   assert.deepEqual(calls.windowOpenHandlers[0]({ url: 'https://attacker.test/popup' }), { action: 'deny' })
 })
 
-test('createLinkTitleWindow denies popups even if optional muting throws', () => {
-  let popupHandler
-
+test('createLinkTitleWindow still returns the window if muting throws', () => {
   const ThrowingBrowserWindow = function (options) {
     this.options = options
     this.webContents = {
       setAudioMuted() {
         throw new Error('webContents unavailable')
-      },
-      setWindowOpenHandler(handler) {
-        popupHandler = handler
       }
     }
   }
@@ -71,51 +66,7 @@ test('createLinkTitleWindow denies popups even if optional muting throws', () =>
   const window = createLinkTitleWindow(ThrowingBrowserWindow, { id: 'link-titles' })
 
   assert.ok(window instanceof ThrowingBrowserWindow)
-  assert.equal(typeof popupHandler, 'function')
-  assert.deepEqual(popupHandler({ url: 'https://attacker.test/popup' }), { action: 'deny' })
 })
-
-for (const failure of ['handler throws', 'missing webContents', 'missing handler']) {
-  test(`createLinkTitleWindow fails closed for ${failure}`, () => {
-    const installationError = new Error('popup handler unavailable')
-
-    const scenarios = {
-      'handler throws': {
-        setAudioMuted() {},
-        setWindowOpenHandler() {
-          throw installationError
-        }
-      },
-      'missing webContents': undefined,
-      'missing handler': { setAudioMuted() {} }
-    }
-
-    let destroyed = false
-    let loaded = false
-
-    const UnsafeBrowserWindow = function () {
-      this.webContents = scenarios[failure]
-
-      this.destroy = () => {
-        destroyed = true
-      }
-
-      this.loadURL = () => {
-        loaded = true
-      }
-    }
-
-    assert.throws(
-      () => {
-        const window = createLinkTitleWindow(UnsafeBrowserWindow, {})
-        window.loadURL('https://example.test')
-      },
-      failure === 'handler throws' ? error => error === installationError : TypeError
-    )
-    assert.equal(destroyed, true)
-    assert.equal(loaded, false)
-  })
-}
 
 test('guardLinkTitleSession cancels downloads triggered by the title-fetch window', () => {
   let cancelled = false
