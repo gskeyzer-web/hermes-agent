@@ -8,10 +8,9 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from agent import model_metadata as metadata
-from agent.codex_catalog import (
-    CODEX_MODELS_CATALOG_URL,
-    codex_catalog_urls,
-    fetch_codex_catalog,
+from agent.model_metadata import (
+    CODEX_MODELS_CATALOG_URLS,
+    fetch_codex_catalog_entries,
 )
 from agent.context_compressor import ContextCompressor
 
@@ -109,7 +108,7 @@ def test_direct_openai_keeps_its_own_window(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
 
-@pytest.mark.parametrize("failure", [None, 400, 500, "empty", "malformed"])
+@pytest.mark.parametrize("failure", [None, 400, 500, "empty", "malformed", "json", "invalid-rows"])
 def test_version_failure_falls_back_once(failure: object) -> None:
     calls = []
 
@@ -118,7 +117,13 @@ def test_version_failure_falls_back_once(failure: object) -> None:
         if len(calls) == 1:
             if failure is None:
                 raise TimeoutError()
+            if failure == "json":
+                response = MagicMock(status_code=200)
+                response.json.side_effect = ValueError("invalid JSON")
+                return response
             data = {"models": []} if failure == "empty" else {"models": "invalid"}
+            if failure == "invalid-rows":
+                data = {"models": [None, {}, {"slug": " "}, {"slug": 123}]}
             return MagicMock(
                 status_code=failure if isinstance(failure, int) else 200,
                 json=lambda: data,
@@ -128,26 +133,28 @@ def test_version_failure_falls_back_once(failure: object) -> None:
             json=lambda: {"models": [{"slug": "gpt-6-sol", "context_window": 272_000}]},
         )
 
-    assert fetch_codex_catalog(fetch)[0]["context_window"] == 272_000
+    assert fetch_codex_catalog_entries(fetch)[0][0]["context_window"] == 272_000
     assert len(calls) == 2
-    assert calls[-1] == CODEX_MODELS_CATALOG_URL
+    assert calls[-1] == CODEX_MODELS_CATALOG_URLS[-1]
 
 
 @pytest.mark.parametrize("status", [401, 403])
 def test_auth_failure_does_not_retry(status: int) -> None:
     fetch = MagicMock(return_value=MagicMock(status_code=status))
-    assert fetch_codex_catalog(fetch) == []
+    assert fetch_codex_catalog_entries(fetch) == ([], status)
     fetch.assert_called_once()
 
 
 @pytest.mark.parametrize("version", [None, "", "bad&account=other", "0.0.0", 155])
-def test_missing_or_invalid_version_uses_sentinel(
+def test_local_cache_version_does_not_change_upstream_negotiation(
     tmp_path: Path, version: object
 ) -> None:
     (tmp_path / "models_cache.json").write_text(
         json.dumps({"client_version": version}), encoding="utf-8"
     )
-    assert codex_catalog_urls() == (CODEX_MODELS_CATALOG_URL,)
+    fetch = MagicMock(return_value=MagicMock(status_code=200, json=lambda: {"models": [{"slug": "example"}]}))
+    assert fetch_codex_catalog_entries(fetch)[0] == [{"slug": "example"}]
+    fetch.assert_called_once_with(CODEX_MODELS_CATALOG_URLS[0])
 
 
 def test_token_scoped_cache_ttl_and_no_persistent_fallback(
@@ -210,7 +217,7 @@ def test_picker_uses_same_authenticated_version(
     from hermes_cli.codex_models import get_codex_model_ids
 
     def fetch(url: str, **kwargs: object) -> MagicMock:
-        assert parse_qs(urlsplit(url).query)["client_version"] == ["0.155.0"]
+        assert parse_qs(urlsplit(url).query)["client_version"] == [metadata.CODEX_NEWEST_CLIENT_VERSION]
         return MagicMock(
             status_code=200,
             json=lambda: {

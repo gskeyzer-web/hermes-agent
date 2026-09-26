@@ -281,6 +281,26 @@ Consumers observe the mode rather than diffing session ids:
 
 Set `in_place: false` to restore the legacy rotating path, where each compaction commits a new session id linked to the previous one via `parent_session_id`.
 
+### Codex OAuth catalogue and context isolation
+
+The picker and context probe share `agent.model_metadata.fetch_codex_catalog_entries`.
+They request `client_version=99.0.0` first and `0.0.0` only as a bounded fallback;
+local `models_cache.json` client versions do not select the protocol version.
+HTTP 401/403 stop immediately. Transport errors, invalid JSON, non-auth HTTP
+errors, empty lists and lists without a usable model slug allow at most the
+second request. No authentication refresh is performed by this helper.
+
+OAuth windows are independent of direct OpenAI API metadata. A model absent
+from both the live catalogue and the OAuth fallback table uses the conservative
+`DEFAULT_FALLBACK_CONTEXT`, never the direct-API window for that slug. Explicit
+context overrides retain their existing precedence. Existing account-scoped
+caching, upstream `-900k` eligibility/max-window handling, native compaction
+and autoraise policies are unchanged.
+
+Lean compression follows the upstream single-summary-call design: oversized
+input is sampled into one auxiliary request, not split into sibling digest
+calls. The former local digest parallelization is therefore unnecessary.
+
 ### Auxiliary feasibility and tail retention
 
 A smaller auxiliary compression model can lower the live compression trigger without
@@ -371,34 +391,16 @@ hermes config set compression.codex_gpt55_autoraise_notice false
 
 ### Codex large-context `-900k` picker variants (opt-in)
 
-Codex context discovery and the model picker share the same catalogue negotiation:
-when `$CODEX_HOME/models_cache.json` (default `~/.codex/models_cache.json`) records a
-valid `client_version`, Hermes queries with that version first. Empty or failed
-responses fall back once to the historical `0.0.0` sentinel; authentication failures
-do not retry. Without local version metadata Hermes uses the sentinel directly.
-Only the client version is read from this file for context discovery; context limits
-come from the authenticated catalogue for the current Hermes account. The sentinel
-can omit newer models, including GPT-6 Sol/Luna.
-
-The standard GPT-6 Sol/Luna Codex window falls back to **272,000** tokens if live
-discovery is unavailable. Unknown Codex models use the conservative 256,000-token
-fallback, never the direct OpenAI API's window. Explicit context overrides still
-take precedence. Sol/Luna do not inherit the gpt-5.x/Astra 85% autoraise or native
-compaction gate. With the default 50% threshold, the existing small-window 75% floor
-therefore gives **204,000** tokens (before any output reservation or auxiliary
-feasibility clamp); the default 256,000-token absolute cap does not lower it.
-This correction does not change prompt-cache keys, request history or cache policy.
-
-The ChatGPT Codex backend *advertises* a 272K window for the gpt-5.4 and
-gpt-5.6 (Sol/Terra/Luna) families, but actually accepts ~911K input tokens
+The ChatGPT Codex backend *advertises* a 272K window for the gpt-5.4, gpt-5.6
+(Sol/Terra/Luna) and GPT-6 (Sol/Terra/Luna) families, but actually accepts ~911K input tokens
 for ChatGPT-subscription accounts (live-verified Aug 2026). Hermes keeps the
 **advertised 272K as the default** for the base slugs — a bigger window means
 more tokens per request and much faster subscription-usage burn, so the large
 window is strictly opt-in.
 
 To use the large window, pick the explicit `-900k` variant in `/model` (e.g.
-`gpt-5.6-sol-900k`, `gpt-5.6-terra-900k`, `gpt-5.6-luna-900k`,
-`gpt-5.4-900k`). These are Hermes-side aliases: the suffix is stripped before
+`gpt-6-sol-900k`, `gpt-6-terra-900k`, `gpt-6-luna-900k`, `gpt-5.6-sol-900k`,
+`gpt-5.6-terra-900k`, `gpt-5.6-luna-900k`, `gpt-5.4-900k`). These are Hermes-side aliases: the suffix is stripped before
 the model id is sent to the backend, and pricing/usage accounting treats them
 as the base model. Slugs that genuinely enforce 272K (gpt-5.5, gpt-5.4-mini)
 have no `-900k` variant. When the authenticated Codex catalog publishes a
