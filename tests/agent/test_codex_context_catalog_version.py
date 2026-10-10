@@ -1,5 +1,6 @@
 """Keep Codex OAuth budgets independent from the direct API model catalogue."""
 
+import base64
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -13,6 +14,12 @@ from agent.model_metadata import (
     fetch_codex_catalog_entries,
 )
 from agent.context_compressor import ContextCompressor
+
+
+def _test_token(account: str = "catalog") -> str:
+    """Synthetic JWT shape accepted by the direct-host credential gate."""
+    claims = base64.urlsafe_b64encode(json.dumps({"sub": account}).encode()).rstrip(b"=").decode()
+    return f"e30.{claims}.{account}"
 
 
 @pytest.fixture(autouse=True)
@@ -48,11 +55,11 @@ def test_versioned_catalog_reaches_new_models(
         response.json.return_value = {"models": rows}
         return response
 
-    monkeypatch.setattr(metadata.requests, "get", catalog)
+    monkeypatch.setattr(metadata.model_metadata_http, "get", catalog)
     context = metadata.get_model_context_length(
         model,
         "https://chatgpt.com/backend-api/codex",
-        api_key="test-token",
+        api_key=_test_token(),
         provider="openai-codex",
     )
     assert context == 300_000
@@ -67,11 +74,11 @@ def test_missing_catalog_keeps_codex_fallback(
 ) -> None:
     response = MagicMock(status_code=status)
     response.json.return_value = {"models": []}
-    monkeypatch.setattr(metadata.requests, "get", lambda *args, **kwargs: response)
+    monkeypatch.setattr(metadata.model_metadata_http, "get", lambda *args, **kwargs: response)
     context = metadata.get_model_context_length(
         model,
         "https://chatgpt.com/backend-api/codex",
-        api_key="test-token",
+        api_key=_test_token(),
         provider="openai-codex",
     )
     assert context == 272_000
@@ -87,12 +94,12 @@ def test_unknown_codex_model_does_not_inherit_api_window(
 ) -> None:
     response = MagicMock(status_code=200)
     response.json.return_value = {"models": []}
-    monkeypatch.setattr(metadata.requests, "get", lambda *args, **kwargs: response)
+    monkeypatch.setattr(metadata.model_metadata_http, "get", lambda *args, **kwargs: response)
     assert (
         metadata.get_model_context_length(
             "future-model",
             "https://chatgpt.com/backend-api/codex",
-            api_key="test-token",
+            api_key=_test_token(),
             provider="openai-codex",
         )
         == metadata.DEFAULT_FALLBACK_CONTEXT
@@ -179,33 +186,33 @@ def test_token_scoped_cache_ttl_and_no_persistent_fallback(
             },
         )
     )
-    monkeypatch.setattr(metadata.requests, "get", fetch)
+    monkeypatch.setattr(metadata.model_metadata_http, "get", fetch)
     route = {
         "provider": "openai-codex",
         "base_url": "https://chatgpt.com/backend-api/codex",
     }
     assert (
-        metadata.get_model_context_length("gpt-6-sol", api_key="one", **route)
+        metadata.get_model_context_length("gpt-6-sol", api_key=_test_token("one"), **route)
         == 280_000
     )
     assert (
-        metadata.get_model_context_length("gpt-6-sol", api_key="one", **route)
+        metadata.get_model_context_length("gpt-6-sol", api_key=_test_token("one"), **route)
         == 280_000
     )
     assert fetch.call_count == save.call_count == 1
     assert (
-        metadata.get_model_context_length("gpt-6-sol", api_key="two", **route)
+        metadata.get_model_context_length("gpt-6-sol", api_key=_test_token("two"), **route)
         == 290_000
     )
     clock[0] += metadata._CODEX_OAUTH_CONTEXT_CACHE_TTL + 1
     assert (
-        metadata.get_model_context_length("gpt-6-sol", api_key="one", **route)
+        metadata.get_model_context_length("gpt-6-sol", api_key=_test_token("one"), **route)
         == 280_000
     )
     assert fetch.call_count == save.call_count == 3
     fetch.side_effect = TimeoutError()
     assert (
-        metadata.get_model_context_length("gpt-6-sol", api_key="offline", **route)
+        metadata.get_model_context_length("gpt-6-sol", api_key=_test_token("offline"), **route)
         == 272_000
     )
     assert save.call_count == 3
@@ -225,15 +232,17 @@ def test_picker_uses_same_authenticated_version(
             },
         )
 
-    monkeypatch.setattr("httpx.get", fetch)
-    assert "gpt-6-sol" in get_codex_model_ids(access_token="test-token")
+    probe = MagicMock(side_effect=fetch)
+    monkeypatch.setattr("httpx.get", probe)
+    assert "gpt-6-sol" in get_codex_model_ids(access_token=_test_token())
+    probe.assert_called_once()
 
 
 def test_explicit_context_override_still_wins(monkeypatch: pytest.MonkeyPatch) -> None:
     fetch = MagicMock(
         side_effect=AssertionError("Explicit overrides must not query the catalogue")
     )
-    monkeypatch.setattr(metadata.requests, "get", fetch)
+    monkeypatch.setattr(metadata.model_metadata_http, "get", fetch)
     assert (
         metadata.get_model_context_length(
             "gpt-6-sol",
