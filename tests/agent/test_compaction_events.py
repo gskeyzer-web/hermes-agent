@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -397,10 +398,14 @@ def test_rotation_publishes_after_the_split_with_the_attempts_own_session(publis
     from hermes_state import SessionDB
     from run_agent import AIAgent
 
-    with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        closing(SessionDB(db_path=Path(tmpdir) / "state.db")) as db,
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
+    ):
         agent = AIAgent(
             api_key="test-key", base_url="https://openrouter.ai/api/v1", model="test/model", quiet_mode=True,
-            session_db=SessionDB(db_path=Path(tmpdir) / "state.db"), session_id="rotating-session",
+            session_db=db, session_id="rotating-session",
             skip_context_files=True, skip_memory=True,
         )
         agent.compression_in_place = False
@@ -424,8 +429,11 @@ def test_a_split_that_fails_after_rewriting_history_is_still_a_compaction(publis
     from hermes_state import SessionDB
     from run_agent import AIAgent
 
-    with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-        db = SessionDB(db_path=Path(tmpdir) / "state.db")
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        closing(SessionDB(db_path=Path(tmpdir) / "state.db")) as db,
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
+    ):
         db.create_session("in-place-session", "cli", model="test/model")
         agent = AIAgent(
             api_key="test-key", base_url="https://openrouter.ai/api/v1", model="test/model", quiet_mode=True,
@@ -462,8 +470,11 @@ def test_an_in_place_engine_whose_split_fails_after_the_archive_is_still_a_compa
         msgs[:] = [msgs[0], {"role": "assistant", "content": "SANITIZED SUMMARY"}, msgs[-1]]
         return msgs
 
-    with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-        db = SessionDB(db_path=Path(tmpdir) / "state.db")
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        closing(SessionDB(db_path=Path(tmpdir) / "state.db")) as db,
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
+    ):
         db.create_session("in-place-engine", "cli", model="test/model")
         agent = AIAgent(
             api_key="test-key", base_url="https://openrouter.ai/api/v1", model="test/model", quiet_mode=True,
