@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from hermes_cli.gateway import _runtime_health_lines
@@ -6,7 +6,7 @@ from hermes_cli.gateway import _runtime_health_lines
 
 def _iso_age(seconds_ago: float) -> str:
     """ISO-8601 UTC timestamp ``seconds_ago`` in the past (drives _marker_is_stale)."""
-    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+    return (datetime.now(UTC) - timedelta(seconds=seconds_ago)).isoformat()
 
 
 _STALE_LINE_PREFIX = "⚠ Stale gateway_state.json:"
