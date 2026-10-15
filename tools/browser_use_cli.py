@@ -294,7 +294,7 @@ def _find_cli() -> Optional[list[str]]:
     so every install, the Desktop bundle included, runs it on the current interpreter."""
     if _harness_site_dir() is None:
         return None
-    return [sys.executable, "-m", "browser_harness.run"]
+    return [sys.executable, str(Path(__file__).with_name("browser_harness_runner.py"))]
 
 
 def _workspace_dir(task_id: Optional[str]) -> Optional[str]:

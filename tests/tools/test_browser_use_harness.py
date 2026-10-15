@@ -18,7 +18,7 @@ def test_harness_runs_on_an_interpreter_without_its_own_site_packages(monkeypatc
     monkeypatch.setenv("PYTHONPATH", "/wrong-abi")
     monkeypatch.setenv("PYTHONHOME", "/wrong-python")
     cmd = bu._find_cli()
-    assert cmd == [sys.executable, "-m", "browser_harness.run"]
+    assert cmd == [sys.executable, str(bu.Path(bu.__file__).with_name("browser_harness_runner.py"))]
     result = subprocess.run([cmd[0], "-S", *cmd[1:], "--version"], env=bu._base_subprocess_env(),
                             capture_output=True, text=True, timeout=120, check=False)
     assert result.returncode == 0, result.stderr
