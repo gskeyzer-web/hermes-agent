@@ -705,6 +705,7 @@ def _init_turn_state(agent, run_budget_seconds):
     _set_defaults(agent, _TURN_STATE)
     # Wall-clock run budget per turn: constructor arg wins, else agent.run_budget_seconds
     # (in _apply_agent_section). None = fully off (no clock reads, injection, or capping).
+    agent._run_budget_explicit = run_budget_seconds is not None
     agent.run_budget_seconds = _normalize_run_budget_seconds(run_budget_seconds)
     from agent.credits_tracker import new_credits_latch
     agent._credits_latch = new_credits_latch()  # threshold-notice latch (sticky keys + gates)
@@ -1392,7 +1393,7 @@ def _apply_agent_section(agent, _agent_cfg):
     agent._execution_guidance = _agent_section.get("execution_guidance", "auto")
 
     # Wall-clock run budget from config — only when the constructor arg was not given.
-    if agent.run_budget_seconds is None:
+    if agent.run_budget_seconds is None and not getattr(agent, "_run_budget_explicit", False):
         agent.run_budget_seconds = _normalize_run_budget_seconds(
             _agent_section.get("run_budget_seconds")
         )

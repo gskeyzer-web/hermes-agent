@@ -671,3 +671,12 @@ Subagents compact where their parent does: at `compression.threshold` × window 
 :::tip
 The agent handles delegation automatically based on the task complexity. You don't need to explicitly ask it to delegate — it will do so when it makes sense.
 :::
+
+### Unbounded investigations
+
+delegation.max_iterations: null (or 0 / unlimited) removes the child turn
+ceiling through the same resolver as the parent. A positive integer still sets
+an explicit limit. --run-budget 0 disables a configured wall-clock budget;
+omitting that argument inherits the profile setting. Human cancellation remains
+active. Use durable Kanban tasks for work that must resume after process exit;
+in-process delegation alone is not a restart checkpoint.

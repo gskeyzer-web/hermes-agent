@@ -90,6 +90,15 @@ def test_constructor_arg_wins_over_config(monkeypatch, tmp_path):
     )
     assert agent.run_budget_seconds == 900.0
 
+
+def test_explicit_zero_disables_configured_budget(monkeypatch, tmp_path):
+    agent = _make_agent(
+        tmp_path, monkeypatch,
+        config_body="agent:\n  run_budget_seconds: 750\n",
+        run_budget_seconds=0,
+    )
+    assert agent.run_budget_seconds is None
+
 # ── stale-timeout deadline scaling ─────────────────────────────────────────
 
 def test_no_budget_stale_timeout_unchanged(monkeypatch, tmp_path):
