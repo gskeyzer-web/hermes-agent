@@ -1447,3 +1447,17 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
+
+### Recovery without an attempt ceiling
+
+Set kanban.failure_limit to 0 to retry ordinary spawn failures, crashes and expired
+claims without a fixed attempt count. This applies to the gateway dispatcher and
+to hermes kanban dispatch unless an explicit --failure-limit overrides it.
+A task-specific positive max_retries still takes precedence. Retry delays use
+persisted run timestamps: 60, 120, 240, 480, then at most 900 seconds. Both ready
+and review lanes respect the delay, including after dispatcher restart.
+
+Failure counters and logs remain available. Explicit blocks, protocol violations,
+terminal provider errors and systemic failures stay blocked until their cause is
+repaired; unlimited retries do not bypass these checks or human cancellation.
+Resource concurrency limits remain independent of mission duration.

@@ -379,7 +379,9 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
     if _task_field(task, "status") in ("done", "archived", "running"):
         return []
     threshold = _positive_int(_failure_threshold(cfg), 3)
-    failure_limit = _positive_int(cfg.get("failure_limit"), threshold)
+    task_limit = _task_field(task, "max_retries")
+    raw_limit = task_limit if task_limit is not None else cfg.get("failure_limit")
+    failure_limit = 0 if raw_limit == 0 else _positive_int(raw_limit, threshold)
     failures = _first_field(task, "consecutive_failures", "spawn_failures", 0)
     # A terminal provider error (credential revoked, model gone) blocks the card after ONE
     # attempt, below any threshold; it still needs an operator, so diagnose it now.
@@ -418,8 +420,23 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
         detail = (
             f"The worker's provider call failed with an error a retry cannot fix (revoked or invalid "
             f"API key, model not found), so the dispatcher blocked the task instead of spending the "
-            f"{failure_limit}-attempt retry budget on it. Full last error:\n\n{err_snippet}\n\n"
+            f"ordinary retry policy on it. Full last error:\n\n{err_snippet}\n\n"
             f"Fix the assignee profile's provider credentials/model, then unblock the task."
+        )
+    elif failure_limit == 0 and _task_field(task, "status") == "blocked":
+        title = f"Agent {outcome_label} x{failures}: explicit block requires repair"
+        detail = (
+            f"Ordinary recovery has no attempt ceiling, but this task is blocked by a separate "
+            f"terminal or explicit condition. Diagnose the worker log, repair the cause and "
+            f"unblock only when resolved. Last error:\n\n{err_snippet}"
+        )
+    elif failure_limit == 0:
+        title = f"Agent {outcome_label} x{failures}: recovery has no attempt ceiling"
+        detail = (
+            f"This task has failed {failures} consecutive attempts. Ordinary recovery continues "
+            f"with a persisted retry delay of up to 15 minutes; terminal provider, protocol and "
+            f"explicit blocks still require repair. Inspect the worker log and change the approach. "
+            f"Last error:\n\n{err_snippet}"
         )
     elif err_snippet:
         title = f"Agent {outcome_label} x{failures}: {err_snippet.splitlines()[0][:160]}"

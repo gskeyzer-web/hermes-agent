@@ -73,13 +73,15 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
 
     raw_failure_limit = kanban_cfg.get("failure_limit", kb.DEFAULT_FAILURE_LIMIT)
     try:
+        if isinstance(raw_failure_limit, (bool, float)):
+            raise ValueError("Boolean is not a retry limit")
         failure_limit = int(raw_failure_limit)
     except (TypeError, ValueError):
         logger.warning("kanban dispatcher: invalid kanban.failure_limit=%r; using default %d",
                        raw_failure_limit, kb.DEFAULT_FAILURE_LIMIT)
         failure_limit = kb.DEFAULT_FAILURE_LIMIT
-    if failure_limit < 1:
-        logger.warning("kanban dispatcher: kanban.failure_limit=%r is below 1; using default %d",
+    if failure_limit < 0:
+        logger.warning("kanban dispatcher: kanban.failure_limit=%r is negative; using default %d",
                        raw_failure_limit, kb.DEFAULT_FAILURE_LIMIT)
         failure_limit = kb.DEFAULT_FAILURE_LIMIT
 

@@ -29,6 +29,20 @@ def _kanban_config() -> dict:
         return {}
 
 
+def _failure_limit(args: argparse.Namespace) -> int:
+    """Explicit CLI setting wins, otherwise use the profile configuration."""
+    value = getattr(args, "failure_limit", None)
+    if value is None:
+        value = _kanban_config().get("failure_limit", kbd.DEFAULT_FAILURE_LIMIT)
+    if isinstance(value, (bool, float)):
+        return kbd.DEFAULT_FAILURE_LIMIT
+    try:
+        parsed = int(value)
+        return parsed if parsed >= 0 else kbd.DEFAULT_FAILURE_LIMIT
+    except (TypeError, ValueError, OverflowError):
+        return kbd.DEFAULT_FAILURE_LIMIT
+
+
 def _poll_loop(interval: float, tick) -> int:
     """Run ``tick()`` every ``interval`` seconds (floor 0.1) until Ctrl-C."""
     try:
@@ -87,7 +101,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             max_spawn=max_spawn,
             max_in_progress=max_in_progress,
-            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
+            failure_limit=_failure_limit(args),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
@@ -253,7 +267,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         kbd.run_daemon(
             interval=args.interval,
             max_spawn=args.max,
-            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
+            failure_limit=_failure_limit(args),
             on_tick=_on_tick,
         )
     finally:

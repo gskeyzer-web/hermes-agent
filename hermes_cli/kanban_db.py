@@ -2103,7 +2103,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                         int(task_limit) if task_limit is not None
                         else int(failure_limit)
                     )
-                    if failures >= effective_limit:
+                    if effective_limit > 0 and failures >= effective_limit:
                         continue
                     conn.execute(
                         "UPDATE tasks SET status = ? "
