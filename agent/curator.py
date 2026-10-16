@@ -1204,6 +1204,10 @@ def maybe_run_curator(*, idle_for_seconds: Optional[float] = None, on_summary: O
         if not _claim_run():  # the holder's own pass is the one counted; every tick would re-count it
             return None
         try:
+            # A previous holder may have completed after our pre-claim check.
+            # Re-read the schedule while owning the claim, before any mutation.
+            if not should_run_now():
+                return None
             return run_curator_review(on_summary=on_summary, trigger="scheduled")
         finally:
             _release_run_claim()
