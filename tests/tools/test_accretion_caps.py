@@ -56,9 +56,10 @@ class TestReadTrackerCaps:
 
 
 class TestCompletionConsumedPrune:
-    def test_prune_drops_completion_entry_with_expired_session(self):
-        """When a finished session is pruned, _completion_consumed is
-        cleared for the same session_id."""
+    def test_prune_keeps_completion_mark_of_expired_session(self):
+        """A pruned finished session keeps its consumed mark: a WebUI deferred
+        wakeup redelivered after a turn longer than FINISHED_TTL_SECONDS must
+        still see the completion as already read (no late duplicate)."""
         from tools.process_registry import ProcessRegistry, FINISHED_TTL_SECONDS
         import time
 
@@ -79,19 +80,19 @@ class TestCompletionConsumedPrune:
             reg._prune_if_needed()
 
         assert "stale-1" not in reg._finished
-        assert "stale-1" not in reg._completion_consumed
+        assert reg.is_completion_consumed("stale-1")
 
 
-    def test_prune_clears_dangling_completion_entries(self):
-        """Stale entries in _completion_consumed without a backing session
-        record are cleared out (belt-and-suspenders invariant)."""
-        from tools.process_registry import ProcessRegistry
+    def test_prune_bounds_dangling_completion_entries(self):
+        """Untracked consumed marks are ids only, but stay bounded
+        (belt-and-suspenders against module-lifetime growth)."""
+        from tools.process_registry import ProcessRegistry, CONSUMED_MARK_CAP
 
         reg = ProcessRegistry()
-        # Add a dangling entry that was never in _running or _finished.
-        reg._completion_consumed.add("dangling-never-tracked")
+        for index in range(CONSUMED_MARK_CAP + 50):
+            reg._completion_consumed.add(f"dangling-{index}")
 
         with reg._lock:
             reg._prune_if_needed()
 
-        assert "dangling-never-tracked" not in reg._completion_consumed
+        assert len(reg._completion_consumed) == CONSUMED_MARK_CAP
