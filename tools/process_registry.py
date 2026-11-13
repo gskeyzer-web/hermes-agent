@@ -6,6 +6,7 @@ Nothing runs on the host unless TERMINAL_ENV=local; other backends run in their 
 
 import codecs
 from contextlib import suppress
+import itertools
 import json
 import logging
 import os
@@ -62,6 +63,10 @@ MAX_OUTPUT_CHARS = 200_000      # rolling output buffer
 COMPLETION_OUTPUT_CHARS = 2000
 FINISHED_TTL_SECONDS = 1800     # keep finished processes 30 minutes
 MAX_PROCESSES = 64              # max tracked processes (LRU pruning)
+# Consumed marks outlive their pruned session: a WebUI deferred wakeup is
+# redelivered when a (possibly hours-long) turn ends and must still see the
+# completion as already read. Ids only, bounded.
+CONSUMED_MARK_CAP = 4096
 
 # Watch-pattern rate limiting, PER SESSION: one watch-match notification per
 # WATCH_MIN_INTERVAL_SECONDS; a match inside the cooldown is dropped and counts as one
@@ -2551,10 +2556,14 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             # release is idempotent, so double-closing is safe.
             self._release_finished_handles(self._finished[sid])
             del self._finished[sid]
-        # Belt-and-suspenders against module-lifetime growth: forget consumed /
-        # poll-observed marks for any session no longer tracked at all.
+        # Belt-and-suspenders against module-lifetime growth: forget
+        # poll-observed marks for any session no longer tracked at all. Consumed
+        # marks are kept past pruning (late deferred wakeups) but stay bounded.
         tracked = self._running.keys() | self._finished.keys()
-        self._completion_consumed &= tracked
+        excess = len(self._completion_consumed) - CONSUMED_MARK_CAP
+        if excess > 0:
+            self._completion_consumed -= set(
+                itertools.islice(self._completion_consumed - tracked, excess))
         self._poll_observed &= tracked
 
 
