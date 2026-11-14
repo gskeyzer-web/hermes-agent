@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from hermes_cli.config_backups import list_config_backups
 
 REPO = Path(__file__).resolve().parents[2]
@@ -32,17 +34,26 @@ def _fresh_load(home: Path) -> tuple[dict, str]:
     return json.loads(proc.stdout), proc.stderr
 
 
-def test_fresh_process_recovers_last_good_config_and_leaves_broken_file_alone(tmp_path):
+@pytest.mark.parametrize("reason", ["good", "pre-setup"])
+def test_fresh_process_recovers_last_good_config_and_leaves_broken_file_alone(tmp_path, reason):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(GOOD, encoding="utf-8")
     first, _ = _fresh_load(tmp_path)
     assert first["approvals"]["deny"] == ["curl*evil*"]
 
+    expected_model = "test/secure"
+    if reason == "pre-setup":
+        from hermes_cli.config_backups import backup_config
+        expected_model = "test/secure-before-setup"
+        config_path.write_text(GOOD.replace("test/secure", expected_model), encoding="utf-8")
+        assert backup_config(config_path, reason) is not None
+        assert not list_config_backups(config_path, "good")
+
     config_path.write_text(BROKEN, encoding="utf-8")
     recovered, _ = _fresh_load(tmp_path)
 
     assert recovered["approvals"]["deny"] == ["curl*evil*"]
-    assert recovered["model"]["default"] == "test/secure"
+    assert recovered["model"]["default"] == expected_model
     assert recovered["custom_providers"][0]["api_key"] == "expanded-secret"
     assert config_path.read_text(encoding="utf-8") == BROKEN
 

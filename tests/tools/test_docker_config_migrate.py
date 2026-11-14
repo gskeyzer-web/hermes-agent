@@ -10,6 +10,7 @@ import pytest
 import hermes_yaml as yaml
 
 from hermes_cli.config import DEFAULT_CONFIG
+from hermes_cli.config_backups import list_config_backups
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "docker_config_migrate.py"
@@ -43,6 +44,64 @@ def _run_migration(hermes_home: Path, **env_overrides: str) -> subprocess.Comple
     )
 
 
+def test_migration_reuses_global_identical_copies_for_rollback(tmp_path):
+    from hermes_cli.config_backups import backup_config
+
+    module = _load_script_module()
+    cfg = tmp_path / "config.yaml"
+    env = tmp_path / ".env"
+    cfg.write_text("model: safe\n", encoding="utf-8")
+    env.write_text("EXAMPLE=test-fixture\n", encoding="utf-8")
+    saved = {path: backup_config(path, "pre-setup") for path in (cfg, env)}
+    assert all(saved.values())
+    backups = module._backup_existing((cfg, env))
+    assert backups == saved
+    for path in (cfg, env):
+        path.write_bytes(b"changed")
+    assert set(module._restore_backups(backups)) == {cfg, env}
+    assert cfg.read_text() == "model: safe\n"
+    assert env.read_text() == "EXAMPLE=test-fixture\n"
+
+
+def test_late_failure_after_real_load_restores_original_bytes(tmp_path, monkeypatch):
+    from hermes_cli import config
+
+    module = _load_script_module()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_SKIP_CHMOD", "1")
+    cfg = tmp_path / "config.yaml"
+    env = tmp_path / ".env"
+    originals = {
+        cfg: b"# original\r\n_config_version: 12\r\nmodel_catalog:\r\n  ttl_hours: 24\r\n",
+        env: b"# fixture only\r\nEXAMPLE=test-fixture\r\n",
+    }
+    for path, content in originals.items():
+        path.write_bytes(content)
+    real_missing = config.get_missing_config_fields
+    intermediate = []
+
+    def missing_after_real_load():
+        result = real_missing()  # Real load_config writes 'good' and prunes globally.
+        retained = list_config_backups(cfg)
+        assert len(retained) == 1
+        assert ".good." in retained[0].name
+        assert retained[0].read_bytes() != originals[cfg]
+        assert not list_config_backups(cfg, "pre-docker-migrate")
+        intermediate.append(retained[0])
+        return result
+
+    def fail_late():
+        assert intermediate, "the real intermediate load must run before failure"
+        env.write_bytes(b"EXAMPLE=changed\n")
+        raise RuntimeError("late migration failure")
+
+    monkeypatch.setattr(config, "get_missing_config_fields", missing_after_real_load)
+    monkeypatch.setattr(config, "get_missing_skill_config_vars", fail_late)
+    with pytest.raises(RuntimeError, match="late migration failure"):
+        module.main()
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
 def test_docker_config_migrate_backs_up_and_migrates_legacy_config(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     env_path = tmp_path / ".env"
@@ -69,7 +128,12 @@ def test_docker_config_migrate_backs_up_and_migrates_legacy_config(tmp_path: Pat
     # max_async_children into max_concurrent_children.
     assert "ttl_hours" not in raw["model_catalog"]
     assert raw["delegation"] == {"max_concurrent_children": 8}
-    assert list((tmp_path / "backups" / "config").glob("config.yaml.pre-docker-migrate.*"))
+    # Successful loads during migration may replace the reason and original bytes globally.
+    retained = list_config_backups(config_path)
+    assert len(retained) == 1
+    saved = yaml.safe_load(retained[0].read_text(encoding="utf-8"))
+    assert saved["delegation"] == {"max_concurrent_children": 8}
+    assert saved["model_catalog"] == raw["model_catalog"]
     assert list((tmp_path / "backups" / "config").glob(".env.pre-docker-migrate.*"))
 
 
@@ -250,7 +314,8 @@ def test_docker_config_migrate_second_boot_preserves_env_byte_for_byte(tmp_path:
     assert env_path.read_bytes() == env_bytes_before
 
     config_after_first = config_path.read_bytes()
-    first_boot_backups = sorted((tmp_path / "backups" / "config").glob("config.yaml.pre-docker-migrate.*"))
+    first_boot_backups = list_config_backups(config_path)
+    assert len(first_boot_backups) == 1
 
     # ── Second boot (host reboot): version is current, must be a no-op. ──
     second = _run_migration(tmp_path)
@@ -261,4 +326,4 @@ def test_docker_config_migrate_second_boot_preserves_env_byte_for_byte(tmp_path:
     assert env_path.read_bytes() == env_bytes_before
     # config.yaml is untouched by the second boot, and no new backup is made.
     assert config_path.read_bytes() == config_after_first
-    assert sorted((tmp_path / "backups" / "config").glob("config.yaml.pre-docker-migrate.*")) == first_boot_backups
+    assert list_config_backups(config_path) == first_boot_backups

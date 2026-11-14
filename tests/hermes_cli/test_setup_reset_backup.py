@@ -65,15 +65,21 @@ class TestResetBackupOrdering:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         config_path = _write_user_config(tmp_path)
 
-        run_setup_wizard(_make_setup_args(non_interactive=True, reset=True))
+        # Check the before-write guarantee at the write boundary. A later successful load
+        # legitimately replaces this point under global keep=1.
+        from hermes_cli import setup
+        real_save = setup.save_config
 
-        backups = _backups(tmp_path)
-        assert len(backups) == 1, f"expected exactly one backup, got {backups}"
-        backup_text = backups[0].read_text(encoding="utf-8")
-        assert SENTINEL_MODEL in backup_text, (
-            "backup captured the post-reset defaults instead of the user's config"
-        )
-        assert "47" in backup_text
+        def save_after_backup(config):
+            backups = _backups(tmp_path)
+            assert len(backups) == 1
+            backup_text = backups[0].read_text(encoding="utf-8")
+            assert SENTINEL_MODEL in backup_text
+            assert "47" in backup_text
+            return real_save(config)
+
+        monkeypatch.setattr(setup, "save_config", save_after_backup)
+        run_setup_wizard(_make_setup_args(non_interactive=True, reset=True))
 
         # The reset itself must still take effect on config.yaml.
         assert SENTINEL_MODEL not in config_path.read_text(encoding="utf-8")
@@ -88,11 +94,22 @@ class TestResetBackupOrdering:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         _write_user_config(tmp_path)
 
+        from hermes_cli import setup
+        real_info = setup._info
+        reported = []
+
+        def info_while_backup_exists(*messages):
+            if messages and "Previous config backed up to:" in messages[0]:
+                backups = _backups(tmp_path)
+                assert len(backups) == 1
+                reported.append(backups[0])
+            return real_info(*messages)
+
+        monkeypatch.setattr(setup, "_info", info_while_backup_exists)
         run_setup_wizard(_make_setup_args(non_interactive=True, reset=True))
 
         out = capsys.readouterr().out
-        backups = _backups(tmp_path)
-        assert len(backups) == 1
+        assert len(reported) == 1
         assert "Configuration reset to defaults." in out
         assert "Previous config backed up to:" in out
-        assert backups[0].name in out
+        assert reported[0].name in out

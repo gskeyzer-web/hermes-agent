@@ -1863,7 +1863,7 @@ class TestFailedZipMemberRecovery:
         assert len(salvages) == 1, "repeated incomplete runs must not pile up"
         with zipfile.ZipFile(salvages[0]) as zf:
             assert "flaky.bin" not in zf.namelist()
-            assert zf.read("config.yaml") == b"model: test\n"
+            assert zf.read("config.yaml") == (hermes_home / "config.yaml").read_bytes()
             assert zf.testzip() is None
 
         # Salvage archives must not count toward retention on the next complete run.

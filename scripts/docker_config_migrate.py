@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import shutil
 import sys
+import os
+import stat
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -26,15 +29,39 @@ def _backup_existing(paths: Iterable[Path]) -> dict[Path, Path]:
     """Snapshot each file into backups/config/; an identical existing snapshot is reused."""
     backups: dict[Path, Path] = {}
     for path in paths:
-        dest = backup_config(path, "pre-docker-migrate") or next(
-            iter(list_config_backups(path, "pre-docker-migrate")), None)
+        dest = backup_config(path, "pre-docker-migrate")
+        if dest is None and path.is_file():
+            # Deduplication is global across reasons; reuse only a byte-identical copy.
+            content = path.read_bytes()  # config-reader: ok — migration rollback file tooling
+            dest = next((p for p in list_config_backups(path) if p.read_bytes() == content), None)
         if dest is not None:
             backups[path] = dest
     return backups
 
 
-def _restore_backups(backups: dict[Path, Path]) -> list[Path]:
+def _restore_backups(
+    backups: dict[Path, Path], original_bytes: dict[Path, bytes] | None = None,
+) -> list[Path]:
     restored: list[Path] = []
+    if original_bytes is not None:
+        # Migration may load the new config and rotate its on-disk pre-migration copy.
+        # Pin only the small originals in RAM for this transaction, not extra retained backups.
+        for original, content in original_bytes.items():
+            mode = stat.S_IMODE(original.stat().st_mode) if original.exists() else 0o600
+            staged: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=original.parent, prefix=f".{original.name}.rollback-", delete=False) as stream:
+                    staged = Path(stream.name)
+                    stream.write(content)
+                os.chmod(staged, mode)
+                if staged.read_bytes() != content:
+                    raise OSError("Migration rollback verification failed")
+                staged.replace(original)
+            finally:
+                if staged is not None:
+                    staged.unlink(missing_ok=True)
+            restored.append(original)
+        return restored
     for original, backup in backups.items():
         if not backup.is_file():
             continue
@@ -75,7 +102,9 @@ def main() -> int:
         )
         return 0
 
-    backups = _backup_existing((get_config_path(), get_env_path()))
+    paths = (get_config_path(), get_env_path())
+    original_bytes = {path: path.read_bytes() for path in paths if path.is_file()}
+    backups = _backup_existing(paths)
     backup_text = ", ".join(str(path) for path in backups.values()) if backups else "none"
     print(
         f"[config-migrate] Migrating config schema {current_ver} -> {latest_ver}; "
@@ -84,7 +113,7 @@ def main() -> int:
     try:
         migrate_config(interactive=False, quiet=False)
     except Exception:
-        restored = _restore_backups(backups)
+        restored = _restore_backups(backups, original_bytes)
         if restored:
             print(
                 "[config-migrate] Migration failed; restored "
@@ -94,7 +123,7 @@ def main() -> int:
 
     post_ver, _ = check_config_version()
     if post_ver < latest_ver:
-        restored = _restore_backups(backups)
+        restored = _restore_backups(backups, original_bytes)
         restored_text = ", ".join(str(path) for path in restored) if restored else "none"
         raise RuntimeError(
             f"migration did not advance config version to {latest_ver} "

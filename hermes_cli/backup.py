@@ -1,6 +1,7 @@
 """Backup and import commands for hermes CLI."""
 
 import json
+import hashlib
 import logging
 import os
 import shutil
@@ -1121,7 +1122,7 @@ _QUICK_STATE_FILES = (
     "feishu_comment_pairing.json",      # Feishu comment subscription pairings
 )
 
-_QUICK_DEFAULT_KEEP = 20
+_QUICK_DEFAULT_KEEP = 1
 
 
 def _quick_snapshot_root(hermes_home: Optional[Path] = None) -> Path:
@@ -1156,9 +1157,9 @@ def _prune_oldest(newest_first: list[Path], keep: int, remove, what: str) -> int
 
 _PRE_UPDATE_BACKUPS_DIR = "backups"
 _PRE_UPDATE_PREFIX = "pre-update-"
-_PRE_UPDATE_DEFAULT_KEEP = 5
+_PRE_UPDATE_DEFAULT_KEEP = 1
 _PRE_MIGRATION_PREFIX = "pre-migration-"
-_PRE_MIGRATION_DEFAULT_KEEP = 5
+_PRE_MIGRATION_DEFAULT_KEEP = 1
 _INCOMPLETE_ZIP_SUFFIX = ".incomplete.zip"
 
 
@@ -1248,6 +1249,22 @@ def create_quick_snapshot(
         )
 
 
+def _copy_verified_snapshot_file(src: Path, dst: Path) -> None:
+    """A silent short/corrupt copy must not evict a valid recovery point."""
+    with src.open("rb") as stream:
+        expected = hashlib.file_digest(stream, "sha256").hexdigest()
+    shutil.copy2(src, dst)
+    with dst.open("rb") as stream:
+        actual = hashlib.file_digest(stream, "sha256").hexdigest()
+    valid = actual == expected
+    if valid and src.name == "config.yaml":
+        from hermes_cli.config_backups import _parse_config_copy
+        valid = _parse_config_copy(dst.read_bytes()) is not None
+    if not valid:
+        dst.unlink(missing_ok=True)
+        raise OSError("Snapshot file validation failed")
+
+
 def _create_quick_snapshot_locked(
     label: Optional[str] = None,
     hermes_home: Optional[Path] = None,
@@ -1315,10 +1332,8 @@ def _create_quick_snapshot_locked(
 
     manifest: dict[str, int] = {}  # rel_path -> file size
     failed_dbs: list[str] = []  # present *.db that could not be snapshotted
-    # #68805: track protected DB files skipped for size — they are snapshot
-    # incompleteness just like a failed copy, so pruning must be suppressed
-    # to preserve the older complete snapshot that may contain the only
-    # recoverable database.
+    failed_files: list[str] = []
+    # Every omitted present file makes this incomplete, not just databases (#68805).
     oversized_skipped: list[str] = []
 
     for rel in _QUICK_STATE_FILES:
@@ -1340,8 +1355,7 @@ def _create_quick_snapshot_locked(
                 if "/workspaces/" in f"/{sub_rel}/" or "/attachments/" in f"/{sub_rel}/":
                     continue
                 if _too_large(sub, sub_rel):
-                    if sub.suffix == ".db":
-                        oversized_skipped.append(sub_rel)
+                    oversized_skipped.append(sub_rel)
                     continue
                 dst = staging_dir / sub_rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1363,9 +1377,10 @@ def _create_quick_snapshot_locked(
                                 )
                             continue
                     else:
-                        shutil.copy2(sub, dst)
+                        _copy_verified_snapshot_file(sub, dst)
                     manifest[sub_rel] = dst.stat().st_size
                 except (OSError, PermissionError) as exc:
+                    failed_files.append(sub_rel)
                     logger.warning("Could not snapshot %s: %s", sub_rel, exc)
             continue
 
@@ -1373,8 +1388,7 @@ def _create_quick_snapshot_locked(
             continue
 
         if _too_large(src, rel):
-            if src.suffix == ".db":
-                oversized_skipped.append(rel)
+            oversized_skipped.append(rel)
             continue
 
         dst = staging_dir / rel
@@ -1395,9 +1409,10 @@ def _create_quick_snapshot_locked(
                         )
                     continue
             else:
-                shutil.copy2(src, dst)
+                _copy_verified_snapshot_file(src, dst)
             manifest[rel] = dst.stat().st_size
         except (OSError, PermissionError) as exc:
+            failed_files.append(rel)
             logger.warning("Could not snapshot %s: %s", rel, exc)
 
     if failed_dbs:
@@ -1435,6 +1450,7 @@ def _create_quick_snapshot_locked(
         "total_size": sum(manifest.values()),
         "files": manifest,
         "failed_dbs": failed_dbs,
+        "failed_files": failed_files,
         "oversized_skipped": oversized_skipped,
     }
     with open(staging_dir / "manifest.json", "w", encoding="utf-8") as f:
@@ -1456,30 +1472,26 @@ def _create_quick_snapshot_locked(
 
     os.replace(staging_dir, snap_dir)
 
-    # Auto-prune. Defaults preserve historical manual /snapshot behavior; callers
-    # with known high-churn safety snapshots (for example pre-update) can pass a
-    # smaller keep value so large state.db copies do not accumulate indefinitely.
-    # #68805 review: skip pruning when a present DB failed to capture OR was
-    # skipped for size — either way the snapshot is incomplete and the older
-    # snapshot may contain the only recoverable database.
-    incomplete = failed_dbs or oversized_skipped
+    # Auto-prune only after a complete replacement; retain one recovery point by default.
+    # A skipped or failed file may exist only in the previous recovery point.
+    incomplete = failed_dbs or failed_files or oversized_skipped
     if not incomplete:
-        _prune_quick_snapshots(root, keep=_QUICK_DEFAULT_KEEP if keep is None else keep)
+        _prune_quick_snapshots(root, keep=_QUICK_DEFAULT_KEEP if keep is None else keep, newest=snap_dir)
     else:
         if oversized_skipped:
             print(
-                "  ⚠ Skipping snapshot prune: DB file(s) skipped for size: "
+                "  ⚠ Skipping snapshot prune: file(s) skipped for size: "
                 + ", ".join(oversized_skipped)
             )
             logger.warning(
-                "Quick snapshot skipped oversized DB file(s): %s",
+                "Quick snapshot skipped oversized file(s): %s",
                 ", ".join(oversized_skipped),
             )
         logger.warning(
-            "Skipping snapshot prune because %d DB(s) failed to capture "
+            "Skipping snapshot prune because %d file(s) failed to capture "
             "and/or %d were oversized — preserving older snapshots as "
             "recovery source",
-            len(failed_dbs), len(oversized_skipped),
+            len(failed_dbs) + len(failed_files), len(oversized_skipped),
         )
 
     logger.info(
@@ -1998,7 +2010,9 @@ def restore_cron_jobs_all_profiles(
     return restored
 
 
-def _prune_quick_snapshots(root: Path, keep: int = _QUICK_DEFAULT_KEEP) -> int:
+def _prune_quick_snapshots(
+    root: Path, keep: int = _QUICK_DEFAULT_KEEP, *, newest: Optional[Path] = None,
+) -> int:
     """Remove oldest quick snapshots beyond the keep limit. Returns count deleted."""
     if not root.exists():
         return 0
@@ -2009,7 +2023,8 @@ def _prune_quick_snapshots(root: Path, keep: int = _QUICK_DEFAULT_KEEP) -> int:
             for d in root.iterdir()
             if d.is_dir() and not d.name.startswith(".") and not d.name.endswith(".partial")
         ),
-        key=lambda d: d.name,
+        # Same-second collision suffixes can sort ahead of a newly reused base name.
+        key=lambda d: (d == newest, d.name),
         reverse=True,
     )
 
@@ -2094,6 +2109,11 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
     def _publish_path() -> Optional[Path]:
         # Decide clean/salvage/discard once; the post-publish stat and return reuse it.
         nonlocal published
+        # ZipFile has closed before this callback runs. Validate the closed bytes before
+        # replacing any complete archive, including a same-second destination.
+        with zipfile.ZipFile(archive_path, "r") as verified:
+            if verified.testzip() is not None:
+                raise zipfile.BadZipFile("Backup archive CRC validation failed")
         if not errors:
             published = out_path
         elif len(errors) < len(files_to_add):
@@ -2109,7 +2129,7 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
                 on_error=lambda rel, exc: errors.append(f"{rel}: {exc}"),
                 on_progress=lambda i: logger.info(
                     "automatic backup phase=archive status=progress completed=%d total=%d", i, len(files_to_add)))
-    except (OSError, _SQLiteSnapshotError) as exc:
+    except (OSError, _SQLiteSnapshotError, zipfile.BadZipFile, zlib.error) as exc:
         # The hidden partial is already gone; ``out_path`` may be a previous valid backup: keep it.
         logger.warning("Full-zip backup: zip write failed: %s", exc)
         return None

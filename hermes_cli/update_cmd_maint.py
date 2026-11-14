@@ -714,9 +714,9 @@ def _run_full_backup() -> None:
         return
 
     try:
-        _keep = _load_updates_cfg().get("backup_keep", 5)
+        _keep = _load_updates_cfg().get("backup_keep", 1)
     except Exception:
-        _keep = 5
+        _keep = 1
 
     print("◆ Creating pre-update backup...")
     t0 = _time.monotonic()

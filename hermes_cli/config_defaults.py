@@ -2340,7 +2340,7 @@ DEFAULT_CONFIG = {
         "pre_update_backup": "quick",
         # Full backup zips to retain (older pruned after each success; floored to 1 so the newest is
         # always kept). The quick snapshot always keeps exactly 1.
-        "backup_keep": 5,
+        "backup_keep": 1,
         # Uncommitted source-tree changes during NON-interactive updates (desktop, gateway — no TTY;
         # interactive updates always stash and ask). stash = stash, pull, restore on top (conflicts
         # stay in a git stash). discard = stash and drop after the pull (stash-and-drop, not reset

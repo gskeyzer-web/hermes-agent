@@ -225,14 +225,16 @@ an override that permits prompting can still interrupt a background check.
 ```yaml
 updates:
   pre_update_backup: quick       # quick (state snapshot, default) | full (snapshot + HERMES_HOME zip) | off
-  backup_keep: 5                 # Keep this many full pre-update backup zips
+  backup_keep: 1                 # Keep this many complete full pre-update backup zips
   non_interactive_local_changes: stash  # stash | discard
   auto_switch_parked_branch: true       # auto-switch a clean, fully merged parked branch back to main
 ```
 
 `pre_update_backup` is the single pre-update safety knob: `quick` (default) snapshots critical state files (pairing data, cron jobs, config, auth; files over 1 GiB are skipped) into `state-snapshots/`; `full` additionally zips all of `HERMES_HOME` into `backups/` and can add minutes on large homes; `off` disables both. Legacy booleans are honored (`true` → `full`, `false` → `off`).
 
-Point-in-time copies of `config.yaml` itself (taken before `hermes setup` rewrites it, before `hermes migrate` edits it, every time the file parses successfully, and when it fails to parse) go to `backups/config/config.yaml.<reason>.<timestamp>`. Identical repeats are skipped and only the newest five per reason are kept, so they never pile up beside `config.yaml`. If `config.yaml` is broken, Hermes serves the newest `good` copy instead of built-in defaults and warns on every start until the YAML is fixed; the broken file is never modified.
+Quick snapshots, full pre-update zips and pre-migration zips each retain one complete recovery point by default. A failed or incomplete replacement does not rotate the previous complete point out; quick snapshots skipped for size are incomplete too. Explicit retention settings still apply. Incomplete zip salvage archives remain separate from complete-backup retention.
+
+Point-in-time copies of `config.yaml` itself go to `backups/config/config.yaml.<reason>.<timestamp>`. Identical repeats are skipped across reasons; by default only one functional copy is kept globally per config, not one per writer. A replacement must parse as a YAML mapping and its copied bytes must match before it is published and older copies are removed. One separate `corrupt` diagnostic copy is retained, never used as a recovery point. If `config.yaml` is broken, Hermes serves the newest functional copy (including a setup/migration copy) instead of built-in defaults and warns on every start until the YAML is fixed; the broken file is never modified. Paired `.env` migration backups remain byte-verified without YAML parsing.
 
 For git installs, Hermes auto-stashes dirty tracked files, plus any untracked file at a path the update adds, before checking out the update branch or pulling. Untracked files the update never writes stay in place. Interactive terminal updates ask whether to keep the changes before stashing anything; answering no deletes them instead of leaving a stash entry behind. Non-interactive updates (desktop/chat app, gateway, or `--yes`) use `updates.non_interactive_local_changes`: `stash` restores local source edits after a successful pull, while `discard` drops the update-created stash after a successful pull. Use `discard` only on managed installs where local source edits are never meant to persist.
 
